@@ -27,9 +27,11 @@ def build_dataframe() -> pd.DataFrame:
     with LEAF_MAP_PATH.open(encoding="utf-8") as file:
         raw_map = json.load(file)
 
-    leaf_map = {}
-    for filename, leaf_ids in raw_map.items():
-        leaf_map.setdefault(_image_key(filename), []).extend(leaf_ids)
+    aliases = {
+        _image_key(filename): leaf_ids
+        for filename, leaf_ids in raw_map.items()
+        if _image_key(filename) != filename
+    }
 
     records = []
     for class_name in SELECTED_CLASSES:
@@ -42,7 +44,7 @@ def build_dataframe() -> pd.DataFrame:
             key = _image_key(image_path.name)
             leaf_id = next(
                 (
-                    value for value in leaf_map.get(key, [])
+                    value for value in raw_map.get(key, aliases.get(key, []))
                     if value.startswith(f"{class_name}:::")
                 ),
                 None,
@@ -67,33 +69,31 @@ def add_group_stratified_split(
     seed: int = SEED,
     save_path: str = SPLIT_SAVE_PATH,
 ) -> pd.DataFrame:
-    """Create 60/20/20 train/validation/test splits by leaf group."""
-    groups = df.groupby("leaf_id", as_index=False).agg(label=("label", "first"))
+    """Create stratified splits while keeping each leaf group intact."""
+    df = df.reset_index(drop=True).copy()
 
-    splitter = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=seed)
+    splitter = StratifiedGroupKFold(
+        n_splits=5, shuffle=True, random_state=seed
+    )
     trainval_idx, test_idx = next(
-        splitter.split(groups, groups["label"], groups["leaf_id"])
+        splitter.split(df, df["label"], groups=df["leaf_id"])
     )
-    trainval = groups.iloc[trainval_idx].reset_index(drop=True)
-    test = groups.iloc[test_idx]
+    trainval = df.iloc[trainval_idx].reset_index(drop=True)
 
-    splitter = StratifiedGroupKFold(n_splits=4, shuffle=True, random_state=seed)
+    splitter = StratifiedGroupKFold(
+        n_splits=4, shuffle=True, random_state=seed
+    )
     train_idx, val_idx = next(
-        splitter.split(trainval, trainval["label"], trainval["leaf_id"])
+        splitter.split(
+            trainval, trainval["label"], groups=trainval["leaf_id"]
+        )
     )
 
-    leaf_to_split = {
-        leaf_id: split
-        for split, subset, indices in (
-            ("train", trainval, train_idx),
-            ("val", trainval, val_idx),
-        )
-        for leaf_id in subset.iloc[indices]["leaf_id"]
-    }
-    leaf_to_split.update({leaf_id: "test" for leaf_id in test["leaf_id"]})
-
-    df = df.copy()
-    df["split"] = df["leaf_id"].map(leaf_to_split)
+    split = pd.Series(index=df.index, dtype="object")
+    split.iloc[test_idx] = "test"
+    split.iloc[trainval_idx[train_idx]] = "train"
+    split.iloc[trainval_idx[val_idx]] = "val"
+    df["split"] = split
 
     print("Class counts by split:\n", pd.crosstab(df["class_name"], df["split"]))
     print(f"Split seed: {seed}")
